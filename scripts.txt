@@ -1,0 +1,6 @@
+//install shared contract repo types, run this from 'frontend' folder
+npm run refresh:contracts
+pip install git+https://github.com/whenigetout/manganarrator_contracts.git#subdirectory=python
+
+//export project tree structure
+git ls-files | tree --fromfile > local_tmp/project_structure.txt
