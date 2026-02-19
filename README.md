@@ -95,6 +95,8 @@ python manage.py migrate
 python manage.py runserver 9000
 ```
 
+OR simply use the start_backend.bat file (windows)
+
 Default:
 ```
 http://127.0.0.1:9000/
