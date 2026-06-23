@@ -7,6 +7,9 @@ from django.conf import settings
 from django.views.decorators.csrf import csrf_exempt
 import json
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 import mn_contracts.ocr as ocr
 from manga_narrator.contracts.endpoint_contracts import (
     MangaDirViewResponse,
@@ -77,6 +80,73 @@ def manga_dir_view(request) -> JsonResponse:
         return JsonResponse(response.model_dump(), safe=False)
     except Exception as e:
         raise 
+
+@csrf_exempt
+@require_POST
+def run_ocr_folder_view(request) -> JsonResponse:
+    """
+    Run OCR for an input MediaRef through the OCR FastAPI service.
+    The frontend talks to this stable orchestrator endpoint; OCR/TTS/video
+    services can still be run independently from their own FastAPI docs.
+    """
+    try:
+        body = json.loads(request.body or "{}")
+        raw_ref = body.get("input_ref") or body.get("folder") or {}
+        media_ref = ocr.MediaRef.model_validate(raw_ref)
+
+        if media_ref.namespace != ocr.MediaNamespace.INPUTS:
+            raise ValueError("OCR input must use the inputs namespace.")
+
+        base_dir = media_ref.namespace_path(Path(settings.MEDIA_ROOT))
+        target_path = media_ref.resolve(Path(settings.MEDIA_ROOT))
+
+        if not utils.is_path_inside(target_path, base_dir):
+            raise ValueError("Invalid OCR input path.")
+        if not target_path.exists() or not target_path.is_dir():
+            raise ValueError("OCR input path must be an existing folder.")
+
+        attach_bboxes = bool(body.get("attach_bboxes", True))
+        annotate_bboxes = bool(body.get("annotate_bboxes", False))
+        output_all_results_to_json = bool(body.get("output_all_results_to_json", False))
+
+        query = urlencode({
+            "attach_bboxes": str(attach_bboxes).lower(),
+            "annotate_bboxes": str(annotate_bboxes).lower(),
+            "output_all_results_to_json": str(output_all_results_to_json).lower(),
+        })
+        post_fields = {"input_path": media_ref.path}
+        custom_prompt = body.get("custom_prompt")
+        if custom_prompt:
+            post_fields["custom_prompt"] = custom_prompt
+
+        ocr_api = os.environ.get("MANGANARRATOR_OCR_API", "http://localhost:7860").rstrip("/")
+        timeout_seconds = int(os.environ.get("MANGANARRATOR_OCR_TIMEOUT", "3600"))
+        request_data = urlencode(post_fields).encode("utf-8")
+        upstream_request = Request(
+            f"{ocr_api}/ocr/folder?{query}",
+            data=request_data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+
+        with urlopen(upstream_request, timeout=timeout_seconds) as upstream_response:
+            raw = upstream_response.read().decode("utf-8")
+            payload = json.loads(raw) if raw else {}
+            return JsonResponse(payload, safe=False, status=upstream_response.status)
+
+    except HTTPError as e:
+        raw = e.read().decode("utf-8", errors="replace")
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            payload = {"error": raw or str(e)}
+        return JsonResponse(payload, safe=False, status=e.code)
+    except URLError as e:
+        return JsonResponse({"error": f"OCR service is unreachable: {e.reason}"}, status=502)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=400)
 
 @require_GET
 def manga_json_file_view(request) -> JsonResponse:
